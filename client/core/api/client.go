@@ -116,3 +116,9 @@ func (c *Client) BootstrapTunnel(ctx context.Context, req protocol.TunnelOffer) 
 	err := c.doJSON(ctx, "/tunnel/bootstrap", req, &resp)
 	return resp, err
 }
+
+func (c *Client) UpdateAdminRole(ctx context.Context, req protocol.AdminRoleUpdateRequest) (protocol.AdminRoleUpdateResponse, error) {
+	var resp protocol.AdminRoleUpdateResponse
+	err := c.doJSON(ctx, "/admin/role", req, &resp)
+	return resp, err
+}
