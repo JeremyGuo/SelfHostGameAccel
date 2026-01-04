@@ -34,6 +34,12 @@ func main() {
 	defer cancel()
 
 	switch strings.ToLower(args[0]) {
+	case "register":
+		username := envOr("USERNAME", "gamer")
+		password := envOr("PASSWORD", "password123")
+		deviceID := envOr("DEVICE_ID", "device-1")
+		resp, err := client.Register(ctx, protocol.RegisterRequest{Username: username, Password: password, DeviceID: deviceID})
+		exit(resp, err)
 	case "login":
 		username := envOr("USERNAME", "gamer")
 		password := envOr("PASSWORD", "password123")
@@ -72,6 +78,7 @@ func usage() {
 	fmt.Println("vpn-client usage:")
 	fmt.Println("  vpn-client [flags] <command> [args]")
 	fmt.Println("Commands:")
+	fmt.Println("  register                # create a new user via USERNAME/PASSWORD/DEVICE_ID")
 	fmt.Println("  login                   # authenticate using USERNAME/PASSWORD env vars")
 	fmt.Println("  create-room             # create room named ROOM_NAME (env)")
 	fmt.Println("  join-room <room-id>     # join with SESSION_TOKEN env and DEVICE_ID")

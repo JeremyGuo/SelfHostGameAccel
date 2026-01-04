@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -15,8 +16,15 @@ type testRig struct {
 }
 
 func newTestRig(t *testing.T) *testRig {
+	return newTestRigWithPath(t, "")
+}
+
+func newTestRigWithPath(t *testing.T, dataPath string) *testRig {
 	t.Helper()
-	s := NewServer()
+	s, err := NewServerWithStorage(dataPath)
+	if err != nil {
+		t.Fatalf("server init: %v", err)
+	}
 	serverTLS, clientTLS, err := GenerateTLSConfigs()
 	if err != nil {
 		t.Fatalf("tls: %v", err)
@@ -126,5 +134,40 @@ func TestKeepaliveEcho(t *testing.T) {
 	}
 	if time.Since(time.Unix(ack.ServerTimeUnix, 0)) > time.Minute {
 		t.Fatalf("server time looks stale")
+	}
+}
+
+func TestRegisterPersistsState(t *testing.T) {
+	dataPath := filepath.Join(t.TempDir(), "state.json")
+	rig := newTestRigWithPath(t, dataPath)
+	defer rig.close()
+
+	var regResp RegisterResponse
+	postJSON(t, rig.client, rig.server.URL+"/auth/register", RegisterRequest{Username: "nova", Password: "warp123", DeviceID: "rig-device"}, &regResp)
+	if regResp.SessionToken == "" || regResp.DeviceToken == "" {
+		t.Fatalf("register response missing tokens")
+	}
+
+	var roomResp CreateRoomResponse
+	postJSON(t, rig.client, rig.server.URL+"/rooms", CreateRoomRequest{Name: "alpha"}, &roomResp)
+
+	var joinResp JoinRoomResponse
+	postJSON(t, rig.client, rig.server.URL+"/rooms/join", JoinRoomRequest{RoomID: roomResp.RoomID, DeviceID: "rig-device", SessionToken: regResp.SessionToken}, &joinResp)
+	if joinResp.VirtualIP == "" {
+		t.Fatalf("expected virtual ip")
+	}
+
+	rig.close()
+
+	restarted := newTestRigWithPath(t, dataPath)
+	defer restarted.close()
+	var loginResp LoginResponse
+	postJSON(t, restarted.client, restarted.server.URL+"/auth/login", LoginRequest{Username: "nova", Password: "warp123"}, &loginResp)
+	if loginResp.SessionToken == "" {
+		t.Fatalf("login should succeed after restart")
+	}
+	postJSON(t, restarted.client, restarted.server.URL+"/rooms/join", JoinRoomRequest{RoomID: roomResp.RoomID, DeviceID: "rig-device", SessionToken: loginResp.SessionToken}, &joinResp)
+	if joinResp.OverlaySubnetReference == "" {
+		t.Fatalf("room metadata should persist")
 	}
 }

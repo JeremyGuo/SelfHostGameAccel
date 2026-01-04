@@ -81,6 +81,12 @@ func (c *Client) Login(ctx context.Context, req protocol.LoginRequest) (protocol
 	return resp, err
 }
 
+func (c *Client) Register(ctx context.Context, req protocol.RegisterRequest) (protocol.RegisterResponse, error) {
+	var resp protocol.RegisterResponse
+	err := c.doJSON(ctx, "/auth/register", req, &resp)
+	return resp, err
+}
+
 func (c *Client) Refresh(ctx context.Context, req protocol.RefreshTokenRequest) (protocol.RefreshTokenResponse, error) {
 	var resp protocol.RefreshTokenResponse
 	err := c.doJSON(ctx, "/auth/refresh", req, &resp)

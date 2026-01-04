@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -31,7 +33,18 @@ type LoginRequest struct {
 	Password string `json:"password"`
 }
 
+type RegisterRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	DeviceID string `json:"device_id"`
+}
+
 type LoginResponse struct {
+	SessionToken string `json:"session_token"`
+	DeviceToken  string `json:"device_token"`
+}
+
+type RegisterResponse struct {
 	SessionToken string `json:"session_token"`
 	DeviceToken  string `json:"device_token"`
 }
@@ -95,12 +108,13 @@ type TunnelAnswer struct {
 }
 
 type Server struct {
-	mux        *http.ServeMux
-	mu         sync.Mutex
-	users      map[string]userRecord
-	sessions   map[string]string
-	deviceBags map[string]string
-	rooms      map[string]*roomRecord
+	mux         *http.ServeMux
+	mu          sync.Mutex
+	users       map[string]userRecord
+	sessions    map[string]string
+	deviceBags  map[string]string
+	rooms       map[string]*roomRecord
+	persistPath string
 }
 
 type userRecord struct {
@@ -121,16 +135,31 @@ type roomRecord struct {
 }
 
 func NewServer() *Server {
+	s, _ := NewServerWithStorage("")
+	return s
+}
+
+// NewServerWithStorage loads state from disk when persistPath is non-empty and persists changes.
+func NewServerWithStorage(persistPath string) (*Server, error) {
 	s := &Server{
-		mux:        http.NewServeMux(),
-		users:      map[string]userRecord{},
-		sessions:   map[string]string{},
-		deviceBags: map[string]string{},
-		rooms:      map[string]*roomRecord{},
+		mux:         http.NewServeMux(),
+		users:       map[string]userRecord{},
+		sessions:    map[string]string{},
+		deviceBags:  map[string]string{},
+		rooms:       map[string]*roomRecord{},
+		persistPath: persistPath,
 	}
 	s.registerRoutes()
-	s.seedDemoUser()
-	return s
+
+	if persistPath != "" {
+		if err := s.loadFromDisk(); err != nil {
+			return nil, err
+		}
+	} else {
+		s.seedDemoUser()
+	}
+
+	return s, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -142,6 +171,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) registerRoutes() {
+	s.mux.HandleFunc("/auth/register", s.handleRegister)
 	s.mux.HandleFunc("/auth/login", s.handleLogin)
 	s.mux.HandleFunc("/auth/refresh", s.handleRefresh)
 	s.mux.HandleFunc("/rooms", s.handleCreateRoom)
@@ -155,6 +185,79 @@ func (s *Server) seedDemoUser() {
 	hash := hashPassword("password123", salt)
 	s.users["gamer"] = userRecord{Username: "gamer", Salt: salt, Hash: hash, Device: "demo-device"}
 	s.deviceBags["demo-device"] = "gamer"
+}
+
+func (s *Server) loadFromDisk() error {
+	state, err := loadState(s.persistPath)
+	if err != nil {
+		return err
+	}
+	if len(state.Users) == 0 {
+		s.seedDemoUser()
+		return nil
+	}
+	s.users = state.Users
+	if state.DeviceBags != nil {
+		s.deviceBags = state.DeviceBags
+	}
+	if state.Rooms != nil {
+		s.rooms = state.Rooms
+	}
+	return nil
+}
+
+func (s *Server) persistLocked() error {
+	if s.persistPath == "" {
+		return nil
+	}
+	state := persistentState{Users: s.users, DeviceBags: s.deviceBags, Rooms: s.rooms}
+	if err := os.MkdirAll(filepath.Dir(s.persistPath), 0o755); err != nil {
+		return err
+	}
+	return saveState(s.persistPath, state)
+}
+
+func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req RegisterRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if strings.TrimSpace(req.Username) == "" || strings.TrimSpace(req.Password) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("username and password required"))
+		return
+	}
+	if req.DeviceID == "" {
+		req.DeviceID = fmt.Sprintf("device-%s", newToken()[:6])
+	}
+	if strings.Contains(req.Username, " ") {
+		writeError(w, http.StatusBadRequest, errors.New("username may not contain spaces"))
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.users[req.Username]; exists {
+		writeError(w, http.StatusConflict, errors.New("user already exists"))
+		return
+	}
+	salt := randomSalt()
+	record := userRecord{Username: req.Username, Salt: salt, Hash: hashPassword(req.Password, salt), Device: req.DeviceID}
+	s.users[req.Username] = record
+	s.deviceBags[req.DeviceID] = req.Username
+	sessionToken := newToken()
+	deviceToken := newToken()
+	s.sessions[sessionToken] = req.Username
+	s.deviceBags[deviceToken] = req.Username
+	if err := s.persistLocked(); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("persist: %w", err))
+		return
+	}
+	writeJSON(w, RegisterResponse{SessionToken: sessionToken, DeviceToken: deviceToken})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +281,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	deviceToken := newToken()
 	s.sessions[sessionToken] = req.Username
 	s.deviceBags[deviceToken] = req.Username
+	if err := s.persistLocked(); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("persist: %w", err))
+		return
+	}
 	writeJSON(w, LoginResponse{SessionToken: sessionToken, DeviceToken: deviceToken})
 }
 
@@ -233,6 +340,10 @@ func (s *Server) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
 		Members:            map[string]string{},
 	}
 	s.rooms[roomID] = rec
+	if err := s.persistLocked(); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("persist: %w", err))
+		return
+	}
 	writeJSON(w, CreateRoomResponse{
 		RoomID:             roomID,
 		OverlaySubnet:      subnet,
@@ -266,6 +377,10 @@ func (s *Server) handleJoinRoom(w http.ResponseWriter, r *http.Request) {
 	virtualIP := fmt.Sprintf("10.0.%d.%d", len(room.Members)+1, len(room.Members)+2)
 	sessionKey := newToken()
 	room.Members[req.DeviceID] = username
+	if err := s.persistLocked(); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("persist: %w", err))
+		return
+	}
 	writeJSON(w, JoinRoomResponse{
 		VirtualIP:              virtualIP,
 		SessionKey:             sessionKey,

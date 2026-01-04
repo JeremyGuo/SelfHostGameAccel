@@ -45,14 +45,58 @@ SelfHostGameAccel/
    └─ core/                # Go tunnel + control-plane library
 ```
 
-## Quick Start (design phase)
+## Quick Start
 
-Implementation is forthcoming. The initial milestones:
+You can now stand up the control-plane API and exercise it from the cross-platform CLI client. TLS is self-signed by default for easy local testing.
 
-1. Define protobuf APIs for auth, room management, and session negotiation.
-2. Implement Go control-plane service (gRPC + TLS) with SQLite persistence.
-3. Implement Go tunnel engine (TUN + UDP/TCP) with OpenVPN-compatible framing.
-4. Wrap tunnel engine for the cross-platform UI (Tauri) and build room management flows.
+### 1) Run the server
+
+```bash
+# From repository root
+go run ./server/cmd/vpn-server -addr :8443 -data ./data/state.json
+```
+
+- `-addr` controls the HTTPS listener.
+- `-data` (optional) persists users, device tokens, and room metadata to JSON so restarts keep state.
+- A demo user (`gamer`/`password123`) is seeded automatically; you can also register new accounts via the client.
+
+### 2) Use the client CLI (Windows/macOS/Linux)
+
+Set the server address and, when talking to the self-signed dev server, allow insecure TLS:
+
+```bash
+SERVER=https://localhost:8443
+CLIENT="go run ./client/cmd/vpn-client --server $SERVER --insecure"
+
+# Register a new user
+$CLIENT register
+
+# Login (returns session + device tokens)
+$CLIENT login
+
+# Create a room and note the returned room id
+$CLIENT create-room
+
+# Join the room (pass SESSION_TOKEN from login)
+SESSION_TOKEN=<token-from-login> $CLIENT join-room room-1
+
+# Keepalive and tunnel negotiation probes
+$CLIENT keepalive
+$CLIENT bootstrap room-1
+```
+
+To build native binaries for distribution, use Go cross-compilation (examples):
+
+```bash
+# Linux server binary
+GOOS=linux GOARCH=amd64 go build -o bin/vpn-server ./server/cmd/vpn-server
+
+# Windows client binary
+GOOS=windows GOARCH=amd64 go build -o bin/vpn-client.exe ./client/cmd/vpn-client
+
+# macOS client binary
+GOOS=darwin GOARCH=arm64 go build -o bin/vpn-client ./client/cmd/vpn-client
+```
 
 ## Why Go + TUN + OpenVPN framing?
 

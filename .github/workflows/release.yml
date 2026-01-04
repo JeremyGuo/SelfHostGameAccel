@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,18 +23,33 @@ jobs:
       - name: Run tests
         run: go test ./...
 
-      - name: Build server
-        run: GOOS=linux GOARCH=amd64 go build -o dist/vpn-server ./server/cmd/vpn-server
-
-      - name: Build client
-        run: GOOS=linux GOARCH=amd64 go build -o dist/vpn-client ./client/cmd/vpn-client
+      - name: Build cross-platform binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in \
+            linux/amd64 \
+            linux/arm64 \
+            darwin/amd64 \
+            darwin/arm64 \
+            windows/amd64 \
+            windows/arm64; do
+            IFS=/ read -r GOOS GOARCH <<<"$target"
+            suffix=""
+            if [ "$GOOS" = "windows" ]; then
+              suffix=".exe"
+            fi
+            echo "Building $GOOS/$GOARCH"
+            GOOS=$GOOS GOARCH=$GOARCH go build -o "dist/vpn-server-${GOOS}-${GOARCH}${suffix}" ./server/cmd/vpn-server
+            GOOS=$GOOS GOARCH=$GOARCH go build -o "dist/vpn-client-${GOOS}-${GOARCH}${suffix}" ./client/cmd/vpn-client
+          done
 
       - name: Create release
         uses: ncipollo/release-action@v1
         with:
           tag: main-${{ github.run_number }}
           name: Automated main build #${{ github.run_number }}
-          artifacts: "dist/vpn-server,dist/vpn-client"
+          artifacts: "dist/*"
           allowUpdates: true
           replacesArtifacts: true
           token: ${{ secrets.GITHUB_TOKEN }}
