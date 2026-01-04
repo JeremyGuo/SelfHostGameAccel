@@ -1,0 +1,37 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build server
+        run: GOOS=linux GOARCH=amd64 go build -o dist/vpn-server ./server/cmd/vpn-server
+
+      - name: Build client
+        run: GOOS=linux GOARCH=amd64 go build -o dist/vpn-client ./client/cmd/vpn-client
+
+      - name: Create release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: main-${{ github.run_number }}
+          name: Automated main build #${{ github.run_number }}
+          artifacts: "dist/vpn-server,dist/vpn-client"
+          allowUpdates: true
+          replacesArtifacts: true
+          token: ${{ secrets.GITHUB_TOKEN }}
