@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package api;
+
+option go_package = "selfhostgameaccel/server/api;api";
+
+enum Transport {
+  TRANSPORT_UNSPECIFIED = 0;
+  TRANSPORT_UDP = 1;
+  TRANSPORT_TCP = 2;
+}
+
+enum CipherSuite {
+  CIPHER_SUITE_UNSPECIFIED = 0;
+  CIPHER_SUITE_AES_256_GCM = 1;
+  CIPHER_SUITE_CHACHA20_POLY1305 = 2;
+}
+
+message LoginRequest {
+  string username = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  string session_token = 1;
+  string device_token = 2;
+}
+
+message RefreshTokenRequest {
+  string device_token = 1;
+}
+
+message RefreshTokenResponse {
+  string session_token = 1;
+}
+
+message CreateRoomRequest {
+  string name = 1;
+  Transport preferred_transport = 2;
+  uint32 mtu = 3;
+}
+
+message CreateRoomResponse {
+  string room_id = 1;
+  string overlay_subnet = 2;
+  Transport preferred_transport = 3;
+  uint32 mtu = 4;
+}
+
+message JoinRoomRequest {
+  string room_id = 1;
+  string device_id = 2;
+  string session_token = 3;
+}
+
+message JoinRoomResponse {
+  string virtual_ip = 1;
+  bytes session_key = 2;
+  Transport transport = 3;
+  uint32 keepalive_interval_seconds = 4;
+}
+
+message Keepalive {
+  uint64 sequence = 1;
+}
+
+message KeepaliveAck {
+  uint64 sequence = 1;
+  int64 server_time_unix_sec = 2;
+}
+
+message TunnelOffer {
+  string room_id = 1;
+  Transport transport = 2;
+  CipherSuite cipher_suite = 3;
+  bytes ephemeral_pub_key = 4;
+}
+
+message TunnelAnswer {
+  Transport transport = 1;
+  CipherSuite cipher_suite = 2;
+  bytes ephemeral_pub_key = 3;
+}
+
+service AuthService {
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+}
+
+service RoomService {
+  rpc CreateRoom(CreateRoomRequest) returns (CreateRoomResponse);
+  rpc JoinRoom(JoinRoomRequest) returns (JoinRoomResponse);
+  rpc Keepalive(stream Keepalive) returns (stream KeepaliveAck);
+}
+
+service TunnelService {
+  rpc Bootstrap(stream TunnelOffer) returns (stream TunnelAnswer);
+}
