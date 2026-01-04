@@ -47,7 +47,11 @@ func main() {
 		exit(resp, err)
 	case "create-room":
 		name := envOr("ROOM_NAME", "coop")
-		resp, err := client.CreateRoom(ctx, protocol.CreateRoomRequest{Name: name, PreferredTransport: protocol.TransportUDP, MTU: 1350})
+		session := envOr("SESSION_TOKEN", "")
+		if session == "" {
+			log.Fatalf("SESSION_TOKEN env var must be set")
+		}
+		resp, err := client.CreateRoom(ctx, protocol.CreateRoomRequest{Name: name, PreferredTransport: protocol.TransportUDP, MTU: 1350, SessionToken: session})
 		exit(resp, err)
 	case "join-room":
 		if len(args) < 2 {
@@ -69,6 +73,22 @@ func main() {
 		offer := protocol.TunnelOffer{RoomID: args[1], Transport: protocol.TransportUDP, CipherSuite: protocol.CipherSuiteAES256GCM, EphemeralKey: "client-ephemeral"}
 		resp, err := client.BootstrapTunnel(ctx, offer)
 		exit(resp, err)
+	case "grant-admin":
+		target := envOr("TARGET_USER", "")
+		session := envOr("SESSION_TOKEN", "")
+		if target == "" || session == "" {
+			log.Fatalf("TARGET_USER and SESSION_TOKEN env vars must be set")
+		}
+		resp, err := client.UpdateAdminRole(ctx, protocol.AdminRoleUpdateRequest{SessionToken: session, TargetUser: target, Grant: true})
+		exit(resp, err)
+	case "revoke-admin":
+		target := envOr("TARGET_USER", "")
+		session := envOr("SESSION_TOKEN", "")
+		if target == "" || session == "" {
+			log.Fatalf("TARGET_USER and SESSION_TOKEN env vars must be set")
+		}
+		resp, err := client.UpdateAdminRole(ctx, protocol.AdminRoleUpdateRequest{SessionToken: session, TargetUser: target, Grant: false})
+		exit(resp, err)
 	default:
 		usage()
 	}
@@ -80,10 +100,12 @@ func usage() {
 	fmt.Println("Commands:")
 	fmt.Println("  register                # create a new user via USERNAME/PASSWORD/DEVICE_ID")
 	fmt.Println("  login                   # authenticate using USERNAME/PASSWORD env vars")
-	fmt.Println("  create-room             # create room named ROOM_NAME (env)")
+	fmt.Println("  create-room             # create room named ROOM_NAME (env) using SESSION_TOKEN")
 	fmt.Println("  join-room <room-id>     # join with SESSION_TOKEN env and DEVICE_ID")
 	fmt.Println("  keepalive               # send a keepalive ping")
 	fmt.Println("  bootstrap <room-id>     # request tunnel parameters")
+	fmt.Println("  grant-admin             # promote TARGET_USER using SESSION_TOKEN")
+	fmt.Println("  revoke-admin            # demote TARGET_USER using SESSION_TOKEN")
 }
 
 func envOr(key, fallback string) string {

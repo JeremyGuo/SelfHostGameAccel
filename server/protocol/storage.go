@@ -15,7 +15,11 @@ type persistentState struct {
 }
 
 func loadState(path string) (persistentState, error) {
-	var state persistentState
+	state := persistentState{
+		Users:      map[string]userRecord{},
+		DeviceBags: map[string]string{},
+		Rooms:      map[string]*roomRecord{},
+	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return state, nil

@@ -61,6 +61,7 @@ type CreateRoomRequest struct {
 	Name               string    `json:"name"`
 	PreferredTransport Transport `json:"preferred_transport"`
 	MTU                int       `json:"mtu"`
+	SessionToken       string    `json:"session_token"`
 }
 
 type CreateRoomResponse struct {
@@ -107,6 +108,17 @@ type TunnelAnswer struct {
 	EphemeralKey string      `json:"ephemeral_pub_key"`
 }
 
+type AdminRoleUpdateRequest struct {
+	SessionToken string `json:"session_token"`
+	TargetUser   string `json:"target_user"`
+	Grant        bool   `json:"grant"`
+}
+
+type AdminRoleUpdateResponse struct {
+	Username string `json:"username"`
+	IsAdmin  bool   `json:"is_admin"`
+}
+
 type Server struct {
 	mux         *http.ServeMux
 	mu          sync.Mutex
@@ -122,6 +134,7 @@ type userRecord struct {
 	Salt     string
 	Hash     string
 	Device   string
+	IsAdmin  bool
 }
 
 type roomRecord struct {
@@ -155,6 +168,12 @@ func NewServerWithStorage(persistPath string) (*Server, error) {
 		if err := s.loadFromDisk(); err != nil {
 			return nil, err
 		}
+		// When persistence is enabled and no users exist yet, allow the first real registration
+		// to become the administrator instead of seeding a demo account.
+		if len(s.users) == 0 {
+			s.sessions = map[string]string{}
+			s.deviceBags = map[string]string{}
+		}
 	} else {
 		s.seedDemoUser()
 	}
@@ -178,12 +197,13 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/rooms/join", s.handleJoinRoom)
 	s.mux.HandleFunc("/rooms/keepalive", s.handleKeepalive)
 	s.mux.HandleFunc("/tunnel/bootstrap", s.handleTunnelBootstrap)
+	s.mux.HandleFunc("/admin/role", s.handleRoleUpdate)
 }
 
 func (s *Server) seedDemoUser() {
 	salt := randomSalt()
 	hash := hashPassword("password123", salt)
-	s.users["gamer"] = userRecord{Username: "gamer", Salt: salt, Hash: hash, Device: "demo-device"}
+	s.users["gamer"] = userRecord{Username: "gamer", Salt: salt, Hash: hash, Device: "demo-device", IsAdmin: true}
 	s.deviceBags["demo-device"] = "gamer"
 }
 
@@ -191,10 +211,6 @@ func (s *Server) loadFromDisk() error {
 	state, err := loadState(s.persistPath)
 	if err != nil {
 		return err
-	}
-	if len(state.Users) == 0 {
-		s.seedDemoUser()
-		return nil
 	}
 	s.users = state.Users
 	if state.DeviceBags != nil {
@@ -246,7 +262,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	salt := randomSalt()
-	record := userRecord{Username: req.Username, Salt: salt, Hash: hashPassword(req.Password, salt), Device: req.DeviceID}
+	isFirstUser := len(s.users) == 0
+	record := userRecord{Username: req.Username, Salt: salt, Hash: hashPassword(req.Password, salt), Device: req.DeviceID, IsAdmin: isFirstUser}
 	s.users[req.Username] = record
 	s.deviceBags[req.DeviceID] = req.Username
 	sessionToken := newToken()
@@ -320,8 +337,22 @@ func (s *Server) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if strings.TrimSpace(req.SessionToken) == "" {
+		writeError(w, http.StatusUnauthorized, errors.New("session token required"))
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	creator, ok := s.sessions[req.SessionToken]
+	if !ok {
+		writeError(w, http.StatusUnauthorized, errors.New("session invalid"))
+		return
+	}
+	creatorRecord := s.users[creator]
+	if !creatorRecord.IsAdmin {
+		writeError(w, http.StatusForbidden, errors.New("admin privileges required"))
+		return
+	}
 	roomID := fmt.Sprintf("room-%d", len(s.rooms)+1)
 	subnet := fmt.Sprintf("10.0.%d.0/24", len(s.rooms)+1)
 	if req.MTU == 0 {
@@ -350,6 +381,60 @@ func (s *Server) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
 		PreferredTransport: rec.PreferredTransport,
 		MTU:                rec.MTU,
 	})
+}
+
+func (s *Server) handleRoleUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req AdminRoleUpdateRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if strings.TrimSpace(req.SessionToken) == "" || strings.TrimSpace(req.TargetUser) == "" {
+		writeError(w, http.StatusBadRequest, errors.New("session_token and target_user are required"))
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	actorUser, ok := s.sessions[req.SessionToken]
+	if !ok {
+		writeError(w, http.StatusUnauthorized, errors.New("session invalid"))
+		return
+	}
+	actor := s.users[actorUser]
+	if !actor.IsAdmin {
+		writeError(w, http.StatusForbidden, errors.New("admin privileges required"))
+		return
+	}
+	target, ok := s.users[req.TargetUser]
+	if !ok {
+		writeError(w, http.StatusNotFound, errors.New("target user not found"))
+		return
+	}
+	if !req.Grant && target.IsAdmin && s.adminCountLocked() == 1 {
+		writeError(w, http.StatusBadRequest, errors.New("cannot revoke the last administrator"))
+		return
+	}
+	target.IsAdmin = req.Grant
+	s.users[req.TargetUser] = target
+	if err := s.persistLocked(); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("persist: %w", err))
+		return
+	}
+	writeJSON(w, AdminRoleUpdateResponse{Username: target.Username, IsAdmin: target.IsAdmin})
+}
+
+func (s *Server) adminCountLocked() int {
+	count := 0
+	for _, user := range s.users {
+		if user.IsAdmin {
+			count++
+		}
+	}
+	return count
 }
 
 func (s *Server) handleJoinRoom(w http.ResponseWriter, r *http.Request) {

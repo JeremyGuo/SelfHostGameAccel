@@ -72,7 +72,7 @@ func TestLoginCreateJoinFlow(t *testing.T) {
 	}
 
 	var roomResp CreateRoomResponse
-	postJSON(t, rig.client, rig.server.URL+"/rooms", CreateRoomRequest{Name: "coop", PreferredTransport: TransportUDP, MTU: 1350}, &roomResp)
+	postJSON(t, rig.client, rig.server.URL+"/rooms", CreateRoomRequest{Name: "coop", PreferredTransport: TransportUDP, MTU: 1350, SessionToken: loginResp.SessionToken}, &roomResp)
 	if roomResp.PreferredTransport != TransportUDP {
 		t.Fatalf("expected UDP preference, got %s", roomResp.PreferredTransport)
 	}
@@ -98,7 +98,7 @@ func TestTunnelNegotiationSelectsTransport(t *testing.T) {
 	postJSON(t, rig.client, rig.server.URL+"/auth/login", LoginRequest{Username: "gamer", Password: "password123"}, &loginResp)
 
 	var roomResp CreateRoomResponse
-	postJSON(t, rig.client, rig.server.URL+"/rooms", CreateRoomRequest{Name: "pvp", PreferredTransport: TransportUDP}, &roomResp)
+	postJSON(t, rig.client, rig.server.URL+"/rooms", CreateRoomRequest{Name: "pvp", PreferredTransport: TransportUDP, SessionToken: loginResp.SessionToken}, &roomResp)
 
 	// UDP path
 	offer := TunnelOffer{RoomID: roomResp.RoomID, Transport: TransportUDP, CipherSuite: CipherSuiteAES256GCM, EphemeralKey: "client-ephemeral"}
@@ -149,7 +149,7 @@ func TestRegisterPersistsState(t *testing.T) {
 	}
 
 	var roomResp CreateRoomResponse
-	postJSON(t, rig.client, rig.server.URL+"/rooms", CreateRoomRequest{Name: "alpha"}, &roomResp)
+	postJSON(t, rig.client, rig.server.URL+"/rooms", CreateRoomRequest{Name: "alpha", SessionToken: regResp.SessionToken}, &roomResp)
 
 	var joinResp JoinRoomResponse
 	postJSON(t, rig.client, rig.server.URL+"/rooms/join", JoinRoomRequest{RoomID: roomResp.RoomID, DeviceID: "rig-device", SessionToken: regResp.SessionToken}, &joinResp)
@@ -169,5 +169,68 @@ func TestRegisterPersistsState(t *testing.T) {
 	postJSON(t, restarted.client, restarted.server.URL+"/rooms/join", JoinRoomRequest{RoomID: roomResp.RoomID, DeviceID: "rig-device", SessionToken: loginResp.SessionToken}, &joinResp)
 	if joinResp.OverlaySubnetReference == "" {
 		t.Fatalf("room metadata should persist")
+	}
+}
+
+func TestFirstRegisteredUserIsAdmin(t *testing.T) {
+	dataPath := filepath.Join(t.TempDir(), "state.json")
+	rig := newTestRigWithPath(t, dataPath)
+	defer rig.close()
+
+	var regResp RegisterResponse
+	postJSON(t, rig.client, rig.server.URL+"/auth/register", RegisterRequest{Username: "leader", Password: "secret"}, &regResp)
+
+	var roomResp CreateRoomResponse
+	resp := postJSON(t, rig.client, rig.server.URL+"/rooms", CreateRoomRequest{Name: "admin-only", SessionToken: regResp.SessionToken}, &roomResp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected admin to create room, got %d", resp.StatusCode)
+	}
+}
+
+func TestNonAdminCannotCreateRoom(t *testing.T) {
+	rig := newTestRig(t)
+	defer rig.close()
+
+	var regResp RegisterResponse
+	postJSON(t, rig.client, rig.server.URL+"/auth/register", RegisterRequest{Username: "member", Password: "pw"}, &regResp)
+
+	resp := postJSON(t, rig.client, rig.server.URL+"/rooms", CreateRoomRequest{Name: "restricted", SessionToken: regResp.SessionToken}, &CreateRoomResponse{})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected forbidden for non-admin, got %d", resp.StatusCode)
+	}
+}
+
+func TestAdminCanGrantAndRevoke(t *testing.T) {
+	rig := newTestRig(t)
+	defer rig.close()
+
+	var adminLogin LoginResponse
+	postJSON(t, rig.client, rig.server.URL+"/auth/login", LoginRequest{Username: "gamer", Password: "password123"}, &adminLogin)
+
+	var regResp RegisterResponse
+	postJSON(t, rig.client, rig.server.URL+"/auth/register", RegisterRequest{Username: "candidate", Password: "pw"}, &regResp)
+
+	// Grant admin rights
+	var roleResp AdminRoleUpdateResponse
+	postJSON(t, rig.client, rig.server.URL+"/admin/role", AdminRoleUpdateRequest{SessionToken: adminLogin.SessionToken, TargetUser: "candidate", Grant: true}, &roleResp)
+	if !roleResp.IsAdmin {
+		t.Fatalf("expected candidate to be admin after grant")
+	}
+
+	// Verify elevated permissions allow room creation
+	resp := postJSON(t, rig.client, rig.server.URL+"/rooms", CreateRoomRequest{Name: "elevated", SessionToken: regResp.SessionToken}, &CreateRoomResponse{})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected granted admin to create room, got %d", resp.StatusCode)
+	}
+
+	// Revoke admin rights
+	postJSON(t, rig.client, rig.server.URL+"/admin/role", AdminRoleUpdateRequest{SessionToken: adminLogin.SessionToken, TargetUser: "candidate", Grant: false}, &roleResp)
+	if roleResp.IsAdmin {
+		t.Fatalf("expected candidate to lose admin role")
+	}
+
+	resp = postJSON(t, rig.client, rig.server.URL+"/rooms", CreateRoomRequest{Name: "blocked", SessionToken: regResp.SessionToken}, &CreateRoomResponse{})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected revoked admin to be blocked, got %d", resp.StatusCode)
 	}
 }
